@@ -1,0 +1,96 @@
+[project]
+name = "trade"
+version = "0.1.0"
+description = "交易分析工具"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "backtrader>=1.9.78.123",
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "matplotlib>=3.7.0",
+    "jupyter>=1.1.1",
+    "baostock>=0.8.9",
+    "dagster>=1.10.13",
+    "dagster-webserver>=1.10.13",
+    "tushare>=1.4.21",
+    "pydantic>=2.11.4",
+    "pydantic-settings>=2.9.1",
+    "devtools>=0.12.2",
+    "akshare>=1.16.86",
+]
+authors = [{ name = "shiyang07ca", email = "shiyang07ca@gmail.com" }]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0.0", "pytest-cov>=4.0.0"]
+[dependency-groups]
+lint = ["mypy>=1.15.0", "ruff>=0.11.8"]
+
+
+[[tool.uv.index]]
+name = "pypi"
+url = "https://mirrors.aliyun.com/pypi/simple"
+verify_ssl = false
+
+
+[tool.mypy]
+ignore_missing_imports = true
+exclude = ["manage\\.py", ".*/migrations/.*\\.py$", ".*/migrations/?$"]
+plugins = ["pydantic.mypy"]
+warn_unused_configs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+
+
+[[tool.mypy.overrides]]
+module = ["celery.*", "redis.*"]
+ignore_missing_imports = true
+
+
+[tool.ruff]
+lint.select = [
+    "E",   # pycodestyle - Error
+    "F",   # Pyflakes
+    "W",   # pycodestyle - Warning
+    "I",   # isort
+    "S",   # flake8-bandit
+    "B",   # flake8-bugbear
+    "N",   # pep8-naming
+    "C90", # mccabe
+    "UP",  # pyupgrade
+    "RUF", # ruff
+]
+lint.ignore = [
+    "E501",   # 忽略行太长的错误
+    "RUF001",
+    "RUF002",
+    "RUF003",
+]
+fix = true
+line-length = 88 # 设置最大行长度
+
+[tool.ruff.lint.per-file-ignores]
+"*/migrations/**" = ["RUF012"]
+"tests/**/*.py" = [
+    "S101",    # asserts allowed in tests...
+    "ARG",     # Unused function args -> fixtures nevertheless are functionally relevant...
+    "FBT",     # Don't care about booleans as positional arguments in tests, e.g. via @pytest.mark.parametrize()
+    "PLR2004", # Magic value used in comparison, ...
+    "S311",    # Standard pseudo-random generators are not suitable for cryptographic purposes
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+[tool.ruff.lint.isort]
+force-single-line = true
+
+[tool.pytest.ini_options]
+disable_test_id_escaping_and_forfeit_all_rights_to_community_support = true
+
+
