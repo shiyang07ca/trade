@@ -13,7 +13,6 @@ dependencies = [
     "baostock>=0.8.9",
     "dagster>=1.10.13",
     "dagster-webserver>=1.10.13",
-    "tushare>=1.4.21",
     "pydantic>=2.11.4",
     "pydantic-settings>=2.9.1",
     "devtools>=0.12.2",
