@@ -17,6 +17,7 @@ dependencies = [
     "pydantic-settings>=2.9.1",
     "devtools>=0.12.2",
     "akshare>=1.16.86",
+    "jupyterlab>=4.4.1",
 ]
 authors = [{ name = "shiyang07ca", email = "shiyang07ca@gmail.com" }]
 

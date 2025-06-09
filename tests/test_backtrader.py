@@ -30,7 +30,7 @@ class MyStrategy(bt.Strategy):
             dt: 日期时间，如果为None则使用当前K线的日期
         """
         dt = dt or self.datas[0].datetime.date(0)
-        print(f"{dt.isoformat()} {txt}")  # 使用 f-string 替代旧的格式化方法
+        print(f"{dt.isoformat()} {txt}")
 
     def __init__(self):
         """
