@@ -18,6 +18,7 @@ dependencies = [
     "devtools>=0.12.2",
     "akshare>=1.16.86",
     "jupyterlab>=4.4.1",
+    "seaborn>=0.13.2",
 ]
 authors = [{ name = "shiyang07ca", email = "shiyang07ca@gmail.com" }]
 
