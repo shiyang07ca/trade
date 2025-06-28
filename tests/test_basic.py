@@ -11,71 +11,12 @@ pip install akshare pandas numpy matplotlib scipy
 """
 
 import akshare as ak
-import matplotlib.font_manager as fm
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
-
-def setup_chinese_font():
-    """
-    设置中文字体并检测可用字体
-    """
-
-    # 获取所有可用字体
-    font_list = [f.name for f in fm.fontManager.ttflist]
-
-    # 检测中文字体
-    chinese_fonts = []
-    possible_fonts = [
-        "PingFang SC",
-        "PingFang HK",
-        "Hiragino Sans GB",
-        "STHeiti",
-        "STFangsong",
-        "Microsoft YaHei",
-        "SimHei",
-        "WenQuanYi Micro Hei",
-        "Noto Sans CJK SC",
-    ]
-
-    for font in possible_fonts:
-        if font in font_list:
-            chinese_fonts.append(font)
-
-    print("检测到的中文字体：", chinese_fonts)
-
-    if chinese_fonts:
-        chosen_font = chinese_fonts[0]
-        print(f"使用字体: {chosen_font}")
-
-        # 更强制性的字体设置
-        plt.rcParams.update(
-            {
-                "font.sans-serif": [chosen_font],
-                "font.family": "sans-serif",
-                "axes.unicode_minus": False,
-                "font.size": 12,
-            }
-        )
-
-        print(f"当前字体设置: {plt.rcParams['font.sans-serif']}")
-        return chosen_font
-    else:
-        print("警告：未找到合适的中文字体")
-        # 搜索其他可能的中文字体
-        other_fonts = [
-            f.name
-            for f in fm.fontManager.ttflist
-            if any(
-                keyword in f.name.lower()
-                for keyword in ["ping", "hei", "unicode", "sans"]
-            )
-        ]
-        print("其他可能的字体：", other_fonts[:10])
-        return None
-
+from trade.utils import setup_chinese_font
 
 # 设置中文字体
 setup_chinese_font()
@@ -202,6 +143,10 @@ def analyze_stock_returns(stock_code: str, stock_name: str):
 
 if __name__ == "__main__":
     # 设置要分析的股票信息
-    stock_code_hailiang = "603138"
-    stock_name_hailiang = "海量数据"
+    # stock_code_hailiang = "603138"
+    # stock_name_hailiang = "海量数据"
+    # analyze_stock_returns(stock_code_hailiang, stock_name_hailiang)
+
+    stock_code_hailiang = "601319"
+    stock_name_hailiang = "中国人保"
     analyze_stock_returns(stock_code_hailiang, stock_name_hailiang)
