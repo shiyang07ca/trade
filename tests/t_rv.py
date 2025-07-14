@@ -1,6 +1,8 @@
 import os
 import time
-from datetime import datetime, UTC, timedelta
+from datetime import UTC
+from datetime import datetime
+from datetime import timedelta
 
 import ccxt
 import matplotlib.pyplot as plt
@@ -146,7 +148,7 @@ def fetch_crypto_data_enhanced(
                 # 检查已有数据是否覆盖目标时间范围
                 first_time = existing_df["datetime"].min()
                 if first_time <= pd.to_datetime(target_start_time, unit="ms"):
-                    print(f"✅ 已有数据覆盖目标时间范围，直接使用现有数据")
+                    print("✅ 已有数据覆盖目标时间范围，直接使用现有数据")
                     # 转换为分析用的DataFrame格式
                     result_df = existing_df.copy()
                     result_df["open"] = result_df["open"].astype(float)
@@ -178,7 +180,7 @@ def fetch_crypto_data_enhanced(
 
         ohlcv = fetch_ohlcv_since(exchange, symbol, timeframe, since)
         if not ohlcv:
-            print(f"❌ 获取数据失败，可能已达到历史数据极限")
+            print("❌ 获取数据失败，可能已达到历史数据极限")
             break
 
         # 检查是否获取到了更早的数据
@@ -718,7 +720,7 @@ def main():
 
     for symbol in crypto_pairs:
         try:
-            result = analyze_crypto_volatility(symbol, days=1000, timeframe="1d")
+            result = analyze_crypto_volatility(symbol, days=3000, timeframe="1d")
             if result:
                 results.append(result)
         except Exception as e:
