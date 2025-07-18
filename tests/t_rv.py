@@ -720,7 +720,7 @@ def main():
 
     for symbol in crypto_pairs:
         try:
-            result = analyze_crypto_volatility(symbol, days=3000, timeframe="1d")
+            result = analyze_crypto_volatility(symbol, days=1500, timeframe="1d")
             if result:
                 results.append(result)
         except Exception as e:

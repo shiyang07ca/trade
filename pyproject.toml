@@ -24,6 +24,7 @@ dependencies = [
     "okx==2.1.2",
     "python-okx>=0.3.9",
     "ccxt>=4.4.94",
+    "ta-lib>=0.6.4",
 ]
 authors = [{ name = "shiyang07ca", email = "shiyang07ca@gmail.com" }]
 

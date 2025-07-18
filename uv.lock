@@ -3185,6 +3185,16 @@ wheels = [
 ]
 
 [[package]]
+name = "ta-lib"
+version = "0.6.4"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "setuptools" },
+]
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/ba/97/a49816dd468a18ee080cf3a04640772a9f6321790d4049cece2490c4b7ad/ta_lib-0.6.4.tar.gz", hash = "sha256:08f55bc5771a6d1ceb1a2b713aad7b05f04eb0061e980c9113571c532d32e9cb" }
+
+[[package]]
 name = "tabulate"
 version = "0.9.0"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
@@ -3320,6 +3330,7 @@ dependencies = [
     { name = "scipy" },
     { name = "seaborn" },
     { name = "statsmodels" },
+    { name = "ta-lib" },
 ]
 
 [package.optional-dependencies]
@@ -3357,6 +3368,7 @@ requires-dist = [
     { name = "scipy", specifier = ">=1.8.0,<1.15.0" },
     { name = "seaborn", specifier = ">=0.13.2" },
     { name = "statsmodels", specifier = ">=0.14.0,<0.15.0" },
+    { name = "ta-lib", specifier = ">=0.6.4" },
 ]
 provides-extras = ["dev"]
 
