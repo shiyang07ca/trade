@@ -25,6 +25,11 @@ dependencies = [
     "python-okx>=0.3.9",
     "ccxt>=4.4.94",
     "ta-lib>=0.6.4",
+    "py-clob-client>=0.24.0",
+    "aiohttp>=3.8.0",
+    "websockets>=11.0.0",
+    "requests>=2.32.3",
+    "httpx>=0.28.1",
 ]
 authors = [{ name = "shiyang07ca", email = "shiyang07ca@gmail.com" }]
 
@@ -99,5 +104,3 @@ force-single-line = true
 
 [tool.pytest.ini_options]
 disable_test_id_escaping_and_forfeit_all_rights_to_community_support = true
-
-
