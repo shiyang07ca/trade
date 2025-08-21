@@ -1,7 +1,7 @@
 [project]
 name = "trade"
 version = "0.1.0"
-description = "交易分析工具"
+description = "trade"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -13,11 +13,27 @@ dependencies = [
     "baostock>=0.8.9",
     "dagster>=1.10.13",
     "dagster-webserver>=1.10.13",
-    "tushare>=1.4.21",
     "pydantic>=2.11.4",
     "pydantic-settings>=2.9.1",
     "devtools>=0.12.2",
     "akshare>=1.16.86",
+    "jupyterlab>=4.4.1",
+    "seaborn>=0.13.2",
+    "scipy>=1.8.0,<1.15.0",
+    "statsmodels>=0.14.0,<0.15.0",
+    "okx==2.1.2",
+    "python-okx>=0.3.9",
+    "ccxt>=4.4.94",
+    "ta-lib>=0.6.4",
+    "py-clob-client>=0.24.0",
+    "aiohttp>=3.8.0",
+    "websockets>=11.0.0",
+    "requests>=2.32.3",
+    "httpx[socks]>=0.28.1",
+    "nautilus-trader>=1.219.0",
+    "ibis-framework>=10.8.0",
+    "web3>=7.13.0",
+    "rich>=14.0.0",
 ]
 authors = [{ name = "shiyang07ca", email = "shiyang07ca@gmail.com" }]
 
@@ -29,6 +45,7 @@ build-backend = "hatchling.build"
 [project.optional-dependencies]
 dev = ["pytest>=7.0.0", "pytest-cov>=4.0.0"]
 [dependency-groups]
+dev = ["ipdb>=0.13.13"]
 lint = ["mypy>=1.15.0", "ruff>=0.11.8"]
 
 
@@ -74,15 +91,6 @@ lint.ignore = [
 fix = true
 line-length = 88 # 设置最大行长度
 
-[tool.ruff.lint.per-file-ignores]
-"*/migrations/**" = ["RUF012"]
-"tests/**/*.py" = [
-    "S101",    # asserts allowed in tests...
-    "ARG",     # Unused function args -> fixtures nevertheless are functionally relevant...
-    "FBT",     # Don't care about booleans as positional arguments in tests, e.g. via @pytest.mark.parametrize()
-    "PLR2004", # Magic value used in comparison, ...
-    "S311",    # Standard pseudo-random generators are not suitable for cryptographic purposes
-]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 15
@@ -92,5 +100,3 @@ force-single-line = true
 
 [tool.pytest.ini_options]
 disable_test_id_escaping_and_forfeit_all_rights_to_community_support = true
-
-

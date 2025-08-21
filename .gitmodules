@@ -1,0 +1,12 @@
+[submodule "external/quant-trading"]
+	path = external/quant-trading
+	url = https://github.com/je-suis-tm/quant-trading.git
+[submodule "external/Financial-Models-Numerical-Methods"]
+	path = external/Financial-Models-Numerical-Methods
+	url = https://github.com/cantaro86/Financial-Models-Numerical-Methods.git
+[submodule "external/Polymarket_arbitrage"]
+	path = external/Polymarket_arbitrage
+	url = git@github.com:shiyang07ca/Polymarket_arbitrage.git
+[submodule "external/FinancePy"]
+	path = external/FinancePy
+	url = https://github.com/domokane/FinancePy.git

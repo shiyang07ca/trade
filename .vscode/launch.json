@@ -1,0 +1,53 @@
+{
+  // Use IntelliSense to learn about possible attributes.
+  // Hover to view descriptions of existing attributes.
+  // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+  "version": "0.2.0",
+  "configurations": [
+
+    {
+      "name": "Python Debugger: Current File",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Python Debugger: 5_1 tree",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "console": "integratedTerminal",
+      "args": ["tree"]
+    },
+    {
+      "name": "Python Debugger: server",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "cia_ctl.cli",
+      "args": ["server", "run", "--addr", "0.0.0.0:9801"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "subProcess": true,
+      "justMyCode": false,
+      "env": {
+        "GEVENT_SUPPORT": "True",
+        "PYTHONASYNCIODEBUG": "1"
+      }
+    },
+    {
+      "name": "Debug with breakpoint() calls",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "cia_ctl.cli",
+      "args": ["server", "run", "--addr", "0.0.0.0:9801"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "subProcess": true,
+      "justMyCode": false,
+      "env": {
+        "PYTHONBREAKPOINT": "debugpy.breakpoint"
+      }
+    }
+  ]
+}
