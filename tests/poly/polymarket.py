@@ -970,6 +970,10 @@ def main():
 if __name__ == "__main__":
     load_dotenv()
 
+    main()
+
+    exit()
+
     p = Polymarket()
 
     # k = p.get_api_key()
