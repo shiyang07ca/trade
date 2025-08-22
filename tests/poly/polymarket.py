@@ -1,10 +1,10 @@
-# core polymarket api
-# https://github.com/Polymarket/py-clob-client/tree/main/examples
+"""
+Polymarket 客户端封装类
+提供对 Polymarket API 的简洁抽象，方便量化策略开发和研究
+"""
 
-import ast
-import json
+import logging
 import os
-import pdb
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -13,1013 +13,1387 @@ import httpx
 from dotenv import load_dotenv
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import ApiCreds
+from py_clob_client.clob_types import AssetType
+from py_clob_client.clob_types import BalanceAllowanceParams
+from py_clob_client.clob_types import MarketOrderArgs
 from py_clob_client.clob_types import OrderArgs
 from py_clob_client.clob_types import OrderBookSummary
+from py_clob_client.clob_types import OrderType
 from py_clob_client.constants import AMOY
 from py_clob_client.constants import POLYGON
 from py_clob_client.order_builder.constants import BUY
-from py_order_utils.builders import OrderBuilder
-from py_order_utils.model import OrderData
-from py_order_utils.signer import Signer
+from py_clob_client.order_builder.constants import SELL
 from web3 import Web3
 from web3.constants import MAX_INT
 
-# geth_poa_middleware 导入可能因 web3.py 版本而异，此处跳过以避免兼容性问题
-# 如果需要POA支持，请根据你的web3.py版本调整导入路径
-geth_poa_middleware = None
-
 
 @dataclass
-class SimpleMarket:
-    """简单市场数据类,替代 agents.utils.objects.SimpleMarket"""
-
-    id: int
-    question: str
-    end: str
-    description: str
-    active: bool
-    funded: bool
-    rewardsMinSize: float
-    rewardsMaxSpread: float
-    spread: float
-    outcomes: str
-    outcome_prices: str
-    clob_token_ids: str
-
-
-@dataclass
-class SimpleEvent:
-    """简单事件数据类,替代 agents.utils.objects.SimpleEvent"""
+class MarketInfo:
+    """市场信息数据类"""
 
     id: str
-    title: str
+    question: str
     description: str
-    markets: str
-    metadata: dict[str, Any]
-    active: bool = True
-    closed: bool = False
-    volume: float = 0.0
+    end_date: str
+    active: bool
+    funded: bool
+    volume: float
+    spread: float
+    outcomes: list[str]
+    outcome_prices: list[float]
+    token_ids: list[str]
 
 
-load_dotenv()
+@dataclass
+class OrderInfo:
+    """订单信息数据类"""
+
+    id: str
+    market: str
+    token_id: str
+    side: str
+    size: float
+    price: float
+    status: str
+    created_at: str
 
 
-class Polymarket:
-    def __init__(self):
+@dataclass
+class BalanceInfo:
+    """余额信息数据类"""
+
+    usdc_balance: float
+    token_balances: dict[str, float]
+    allowances: dict[str, float]
+
+
+class PolymarketError(Exception):
+    """Polymarket 相关错误"""
+
+    pass
+
+
+class PolymarketClient:
+    """
+    Polymarket 客户端封装类
+
+    提供对 Polymarket 各种API的统一抽象，包括：
+    - 市场数据获取
+    - 订单管理
+    - 余额和授权管理
+    - 链上交互
+    """
+
+    def __init__(
+        self,
+        private_key: str | None = None,
+        use_testnet: bool = False,
+        dry_run: bool = True,
+        log_level: str = "INFO",
+    ):
+        """
+        初始化 Polymarket 客户端
+
+        Args:
+            private_key: 钱包私钥，如果为None会从环境变量读取
+            use_testnet: 是否使用测试网络 (AMOY)
+            dry_run: 是否为模拟模式，不实际执行交易
+            log_level: 日志级别
+        """
         load_dotenv()
-        self.dry_run = os.getenv("DRY_RUN", "false").lower() == "true"
 
-        # Configuración básica
-        self.private_key = os.getenv("PK")
-        self.chain_id = POLYGON
+        # 配置日志
+        logging.basicConfig(
+            level=getattr(logging, log_level),
+            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        )
+        self.logger = logging.getLogger(self.__class__.__name__)
 
-        # URLs y endpoints
-        self.clob_url = "https://clob.polymarket.com"
+        # 基础配置
+        self.dry_run = dry_run
+        self.private_key = private_key or os.getenv("PK")
+        if not self.private_key:
+            raise PolymarketError(
+                "Private key not found in environment variables"
+            ) from None
+
+        self.chain_id = AMOY if use_testnet else POLYGON
+        self.use_testnet = use_testnet
+
+        # API 端点配置
+        self.clob_url = os.getenv("CLOB_API_URL", "https://clob.polymarket.com")
         self.gamma_url = "https://gamma-api.polymarket.com"
-        self.gamma_markets_endpoint = f"{self.gamma_url}/markets"
-        self.gamma_events_endpoint = f"{self.gamma_url}/events"
-        self.polygon_rpc = "https://polygon-rpc.com"
+        self.polygon_rpc = os.getenv("POLYGON_RPC", "https://polygon-rpc.com")
 
-        # Web3 setup
+        # 合约地址 (Polygon 主网)
+        self.contract_addresses = {
+            "usdc": Web3.to_checksum_address(
+                "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+            ),
+            "ctf": Web3.to_checksum_address(
+                "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+            ),
+            "exchange": Web3.to_checksum_address(
+                "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
+            ),
+            "neg_risk_exchange": Web3.to_checksum_address(
+                "0xC5d563A36AE78145C45a50134d48A1215220f80a"
+            ),
+            "neg_risk_adapter": Web3.to_checksum_address(
+                "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
+            ),
+        }
+
+        # 初始化组件
+        self._init_web3()
+        self._init_clob_client()
+        self._init_contracts()
+
+        # 获取钱包地址
+        self.wallet_address = self._get_wallet_address()
+        self.logger.info(
+            f"Initialized Polymarket client for wallet: {self.wallet_address}"
+        )
+        self.logger.info(
+            f"Network: {'Testnet (Amoy)' if use_testnet else 'Mainnet (Polygon)'}"
+        )
+        self.logger.info(f"Dry run mode: {dry_run}")
+
+    def _init_web3(self) -> None:
+        """初始化 Web3 连接"""
         self.w3 = Web3(Web3.HTTPProvider(self.polygon_rpc))
-        if geth_poa_middleware is not None:
-            self.w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+        if not self.w3.is_connected():
+            raise PolymarketError(
+                f"Cannot connect to Web3 provider: {self.polygon_rpc}"
+            ) from None
 
-        # Wallet setup
-        self.wallet_address = self.get_address_for_private_key()
-        print(f"Initialized wallet: {self.wallet_address}")
+    def _init_clob_client(self) -> None:
+        """初始化 CLOB 客户端"""
+        try:
+            # 创建客户端
+            self.client = ClobClient(
+                self.clob_url, key=self.private_key, chain_id=self.chain_id
+            )
 
-        # Contract addresses (usando checksum addresses)
-        self.exchange_address = Web3.to_checksum_address(
-            "0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e"
-        )
-        self.neg_risk_exchange_address = Web3.to_checksum_address(
-            "0xC5d563A36AE78145C45a50134d48A1215220f80a"
-        )
-        self.usdc_address = Web3.to_checksum_address(
-            "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-        )  # USDC en Polygon
+            # 设置 API 凭证
+            api_key = os.getenv("CLOB_API_KEY")
+            api_secret = os.getenv("CLOB_SECRET")
+            api_passphrase = os.getenv("CLOB_PASS_PHRASE")
 
-        # USDC contract setup
-        self.usdc_abi = """[
+            if all([api_key, api_secret, api_passphrase]):
+                creds = ApiCreds(
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    api_passphrase=api_passphrase,
+                )
+                self.client.set_api_creds(creds)
+                self.logger.info("Using existing API credentials")
+            else:
+                # 创建或派生 API 凭证
+                creds = self.client.create_or_derive_api_creds()
+                self.client.set_api_creds(creds)
+                self.logger.info("Created new API credentials")
+
+        except Exception as e:
+            raise PolymarketError(f"Failed to initialize CLOB client: {e}") from e
+
+    def _init_contracts(self) -> None:
+        """初始化智能合约实例"""
+        # USDC 合约 ABI (简化版)
+        usdc_abi = [
             {
-                "constant": true,
+                "constant": True,
                 "inputs": [{"name": "_owner", "type": "address"}],
                 "name": "balanceOf",
                 "outputs": [{"name": "balance", "type": "uint256"}],
-                "type": "function"
+                "type": "function",
             },
             {
-                "constant": false,
-                "inputs": [{"name": "_spender", "type": "address"},{"name": "_value", "type": "uint256"}],
+                "constant": False,
+                "inputs": [
+                    {"name": "_spender", "type": "address"},
+                    {"name": "_value", "type": "uint256"},
+                ],
                 "name": "approve",
                 "outputs": [{"name": "success", "type": "bool"}],
-                "type": "function"
+                "type": "function",
             },
             {
-                "constant": true,
-                "inputs": [{"name": "_owner", "type": "address"},{"name": "_spender", "type": "address"}],
+                "constant": True,
+                "inputs": [
+                    {"name": "_owner", "type": "address"},
+                    {"name": "_spender", "type": "address"},
+                ],
                 "name": "allowance",
                 "outputs": [{"name": "remaining", "type": "uint256"}],
-                "type": "function"
-            }
-        ]"""
+                "type": "function",
+            },
+        ]
 
-        self.usdc = self.w3.eth.contract(
-            address=self.usdc_address, abi=json.loads(self.usdc_abi)
-        )
-
-        # Initialize CLOB client
-        self.client = ClobClient(
-            self.clob_url, key=self.private_key, chain_id=self.chain_id
-        )
-
-        # Set API credentials
-        creds = ApiCreds(
-            api_key=os.getenv("CLOB_API_KEY"),
-            api_secret=os.getenv("CLOB_SECRET"),
-            api_passphrase=os.getenv("CLOB_PASS_PHRASE"),
-        )
-        self.client.set_api_creds(creds)
-
-        self.erc20_approve = """[{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"owner","type":"address"},{"indexed":true,"internalType":"address","name":"spender","type":"address"},{"indexed":false,"internalType":"uint256","name":"value","type":"uint256"}],"name":"Approval","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"authorizer","type":"address"},{"indexed":true,"internalType":"bytes32","name":"nonce","type":"bytes32"}],"name":"AuthorizationCanceled","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"authorizer","type":"address"},{"indexed":true,"internalType":"bytes32","name":"nonce","type":"bytes32"}],"name":"AuthorizationUsed","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"account","type":"address"}],"name":"Blacklisted","type":"event"},{"anonymous":false,"inputs":[{"indexed":false,"internalType":"address","name":"userAddress","type":"address"},{"indexed":false,"internalType":"address payable","name":"relayerAddress","type":"address"},{"indexed":false,"internalType":"bytes","name":"functionSignature","type":"bytes"}],"name":"MetaTransactionExecuted","type":"event"},{"anonymous":false,"inputs":[],"name":"Pause","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"newRescuer","type":"address"}],"name":"RescuerChanged","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"bytes32","name":"role","type":"bytes32"},{"indexed":true,"internalType":"bytes32","name":"previousAdminRole","type":"bytes32"},{"indexed":true,"internalType":"bytes32","name":"newAdminRole","type":"bytes32"}],"name":"RoleAdminChanged","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"bytes32","name":"role","type":"bytes32"},{"indexed":true,"internalType":"address","name":"account","type":"address"},{"indexed":true,"internalType":"address","name":"sender","type":"address"}],"name":"RoleGranted","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"bytes32","name":"role","type":"bytes32"},{"indexed":true,"internalType":"address","name":"account","type":"address"},{"indexed":true,"internalType":"address","name":"sender","type":"address"}],"name":"RoleRevoked","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"from","type":"address"},{"indexed":true,"internalType":"address","name":"to","type":"address"},{"indexed":false,"internalType":"uint256","name":"value","type":"uint256"}],"name":"Transfer","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"account","type":"address"}],"name":"UnBlacklisted","type":"event"},{"anonymous":false,"inputs":[],"name":"Unpause","type":"event"},{"inputs":[],"name":"APPROVE_WITH_AUTHORIZATION_TYPEHASH","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"BLACKLISTER_ROLE","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"CANCEL_AUTHORIZATION_TYPEHASH","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"DECREASE_ALLOWANCE_WITH_AUTHORIZATION_TYPEHASH","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"DEFAULT_ADMIN_ROLE","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"DEPOSITOR_ROLE","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"DOMAIN_SEPARATOR","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"EIP712_VERSION","outputs":[{"internalType":"string","name":"","type":"string"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"INCREASE_ALLOWANCE_WITH_AUTHORIZATION_TYPEHASH","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"META_TRANSACTION_TYPEHASH","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"PAUSER_ROLE","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"PERMIT_TYPEHASH","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"RESCUER_ROLE","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"TRANSFER_WITH_AUTHORIZATION_TYPEHASH","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"WITHDRAW_WITH_AUTHORIZATION_TYPEHASH","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"owner","type":"address"},{"internalType":"address","name":"spender","type":"address"}],"name":"allowance","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"spender","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"}],"name":"approve","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"owner","type":"address"},{"internalType":"address","name":"spender","type":"address"},{"internalType":"uint256","name":"value","type":"uint256"},{"internalType":"uint256","name":"validAfter","type":"uint256"},{"internalType":"uint256","name":"validBefore","type":"uint256"},{"internalType":"bytes32","name":"nonce","type":"bytes32"},{"internalType":"uint8","name":"v","type":"uint8"},{"internalType":"bytes32","name":"r","type":"bytes32"},{"internalType":"bytes32","name":"s","type":"bytes32"}],"name":"approveWithAuthorization","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"authorizer","type":"address"},{"internalType":"bytes32","name":"nonce","type":"bytes32"}],"name":"authorizationState","outputs":[{"internalType":"enum GasAbstraction.AuthorizationState","name":"","type":"uint8"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"balanceOf","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"blacklist","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"blacklisters","outputs":[{"internalType":"address[]","name":"","type":"address[]"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"authorizer","type":"address"},{"internalType":"bytes32","name":"nonce","type":"bytes32"},{"internalType":"uint8","name":"v","type":"uint8"},{"internalType":"bytes32","name":"r","type":"bytes32"},{"internalType":"bytes32","name":"s","type":"bytes32"}],"name":"cancelAuthorization","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"decimals","outputs":[{"internalType":"uint8","name":"","type":"uint8"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"spender","type":"address"},{"internalType":"uint256","name":"subtractedValue","type":"uint256"}],"name":"decreaseAllowance","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"owner","type":"address"},{"internalType":"address","name":"spender","type":"address"},{"internalType":"uint256","name":"decrement","type":"uint256"},{"internalType":"uint256","name":"validAfter","type":"uint256"},{"internalType":"uint256","name":"validBefore","type":"uint256"},{"internalType":"bytes32","name":"nonce","type":"bytes32"},{"internalType":"uint8","name":"v","type":"uint8"},{"internalType":"bytes32","name":"r","type":"bytes32"},{"internalType":"bytes32","name":"s","type":"bytes32"}],"name":"decreaseAllowanceWithAuthorization","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"user","type":"address"},{"internalType":"bytes","name":"depositData","type":"bytes"}],"name":"deposit","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"userAddress","type":"address"},{"internalType":"bytes","name":"functionSignature","type":"bytes"},{"internalType":"bytes32","name":"sigR","type":"bytes32"},{"internalType":"bytes32","name":"sigS","type":"bytes32"},{"internalType":"uint8","name":"sigV","type":"uint8"}],"name":"executeMetaTransaction","outputs":[{"internalType":"bytes","name":"","type":"bytes"}],"stateMutability":"payable","type":"function"},{"inputs":[{"internalType":"bytes32","name":"role","type":"bytes32"}],"name":"getRoleAdmin","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"bytes32","name":"role","type":"bytes32"},{"internalType":"uint256","name":"index","type":"uint256"}],"name":"getRoleMember","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"bytes32","name":"role","type":"bytes32"}],"name":"getRoleMemberCount","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"bytes32","name":"role","type":"bytes32"},{"internalType":"address","name":"account","type":"address"}],"name":"grantRole","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"bytes32","name":"role","type":"bytes32"},{"internalType":"address","name":"account","type":"address"}],"name":"hasRole","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"spender","type":"address"},{"internalType":"uint256","name":"addedValue","type":"uint256"}],"name":"increaseAllowance","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"owner","type":"address"},{"internalType":"address","name":"spender","type":"address"},{"internalType":"uint256","name":"increment","type":"uint256"},{"internalType":"uint256","name":"validAfter","type":"uint256"},{"internalType":"uint256","name":"validBefore","type":"uint256"},{"internalType":"bytes32","name":"nonce","type":"bytes32"},{"internalType":"uint8","name":"v","type":"uint8"},{"internalType":"bytes32","name":"r","type":"bytes32"},{"internalType":"bytes32","name":"s","type":"bytes32"}],"name":"increaseAllowanceWithAuthorization","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"string","name":"newName","type":"string"},{"internalType":"string","name":"newSymbol","type":"string"},{"internalType":"uint8","name":"newDecimals","type":"uint8"},{"internalType":"address","name":"childChainManager","type":"address"}],"name":"initialize","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"initialized","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"isBlacklisted","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"name","outputs":[{"internalType":"string","name":"","type":"string"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"owner","type":"address"}],"name":"nonces","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"pause","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"paused","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"pausers","outputs":[{"internalType":"address[]","name":"","type":"address[]"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"owner","type":"address"},{"internalType":"address","name":"spender","type":"address"},{"internalType":"uint256","name":"value","type":"uint256"},{"internalType":"uint256","name":"deadline","type":"uint256"},{"internalType":"uint8","name":"v","type":"uint8"},{"internalType":"bytes32","name":"r","type":"bytes32"},{"internalType":"bytes32","name":"s","type":"bytes32"}],"name":"permit","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"bytes32","name":"role","type":"bytes32"},{"internalType":"address","name":"account","type":"address"}],"name":"renounceRole","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"contract IERC20","name":"tokenContract","type":"address"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"}],"name":"rescueERC20","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"rescuers","outputs":[{"internalType":"address[]","name":"","type":"address[]"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"bytes32","name":"role","type":"bytes32"},{"internalType":"address","name":"account","type":"address"}],"name":"revokeRole","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"symbol","outputs":[{"internalType":"string","name":"","type":"string"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"totalSupply","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"recipient","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"}],"name":"transfer","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"sender","type":"address"},{"internalType":"address","name":"recipient","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"}],"name":"transferFrom","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"from","type":"address"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"value","type":"uint256"},{"internalType":"uint256","name":"validAfter","type":"uint256"},{"internalType":"uint256","name":"validBefore","type":"uint256"},{"internalType":"bytes32","name":"nonce","type":"bytes32"},{"internalType":"uint8","name":"v","type":"uint8"},{"internalType":"bytes32","name":"r","type":"bytes32"},{"internalType":"bytes32","name":"s","type":"bytes32"}],"name":"transferWithAuthorization","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"unBlacklist","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"unpause","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"string","name":"newName","type":"string"},{"internalType":"string","name":"newSymbol","type":"string"}],"name":"updateMetadata","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint256","name":"amount","type":"uint256"}],"name":"withdraw","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"owner","type":"address"},{"internalType":"uint256","name":"value","type":"uint256"},{"internalType":"uint256","name":"validAfter","type":"uint256"},{"internalType":"uint256","name":"validBefore","type":"uint256"},{"internalType":"bytes32","name":"nonce","type":"bytes32"},{"internalType":"uint8","name":"v","type":"uint8"},{"internalType":"bytes32","name":"r","type":"bytes32"},{"internalType":"bytes32","name":"s","type":"bytes32"}],"name":"withdrawWithAuthorization","outputs":[],"stateMutability":"nonpayable","type":"function"}]"""
-        self.erc1155_set_approval = """[{"inputs": [{ "internalType": "address", "name": "operator", "type": "address" },{ "internalType": "bool", "name": "approved", "type": "bool" }],"name": "setApprovalForAll","outputs": [],"stateMutability": "nonpayable","type": "function"}]"""
-
-        self.usdc_address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-        self.ctf_address = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
-
-        self.web3 = Web3(Web3.HTTPProvider(self.polygon_rpc))
-        if geth_poa_middleware is not None:
-            self.web3.middleware_onion.inject(geth_poa_middleware, layer=0)
-
-        self.usdc = self.web3.eth.contract(
-            address=self.usdc_address, abi=self.erc20_approve
-        )
-        self.ctf = self.web3.eth.contract(
-            address=self.ctf_address, abi=self.erc1155_set_approval
-        )
-
-        self._init_api_keys()
-        self._init_approvals(False)
-
-    def _init_api_keys(self) -> None:
-        self.client = ClobClient(
-            self.clob_url, key=self.private_key, chain_id=self.chain_id
-        )
-        self.credentials = self.client.create_or_derive_api_creds()
-        self.client.set_api_creds(self.credentials)
-        # print(self.credentials)
-
-    def _init_approvals(self, run: bool = False) -> None:
-        if not run:
-            return
-
-        priv_key = self.private_key
-        pub_key = self.get_address_for_private_key()
-        chain_id = self.chain_id
-        web3 = self.web3
-        nonce = web3.eth.get_transaction_count(pub_key)
-        usdc = self.usdc
-        ctf = self.ctf
-
-        # CTF Exchange
-        raw_usdc_approve_txn = usdc.functions.approve(
-            "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E", int(MAX_INT, 0)
-        ).build_transaction({"chainId": chain_id, "from": pub_key, "nonce": nonce})
-        signed_usdc_approve_tx = web3.eth.account.sign_transaction(
-            raw_usdc_approve_txn, private_key=priv_key
-        )
-        send_usdc_approve_tx = web3.eth.send_raw_transaction(
-            signed_usdc_approve_tx.raw_transaction
-        )
-        usdc_approve_tx_receipt = web3.eth.wait_for_transaction_receipt(
-            send_usdc_approve_tx, 600
-        )
-        print(usdc_approve_tx_receipt)
-
-        nonce = web3.eth.get_transaction_count(pub_key)
-
-        raw_ctf_approval_txn = ctf.functions.setApprovalForAll(
-            "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E", True
-        ).build_transaction({"chainId": chain_id, "from": pub_key, "nonce": nonce})
-        signed_ctf_approval_tx = web3.eth.account.sign_transaction(
-            raw_ctf_approval_txn, private_key=priv_key
-        )
-        send_ctf_approval_tx = web3.eth.send_raw_transaction(
-            signed_ctf_approval_tx.raw_transaction
-        )
-        ctf_approval_tx_receipt = web3.eth.wait_for_transaction_receipt(
-            send_ctf_approval_tx, 600
-        )
-        print(ctf_approval_tx_receipt)
-
-        nonce = web3.eth.get_transaction_count(pub_key)
-
-        # Neg Risk CTF Exchange
-        raw_usdc_approve_txn = usdc.functions.approve(
-            "0xC5d563A36AE78145C45a50134d48A1215220f80a", int(MAX_INT, 0)
-        ).build_transaction({"chainId": chain_id, "from": pub_key, "nonce": nonce})
-        signed_usdc_approve_tx = web3.eth.account.sign_transaction(
-            raw_usdc_approve_txn, private_key=priv_key
-        )
-        send_usdc_approve_tx = web3.eth.send_raw_transaction(
-            signed_usdc_approve_tx.raw_transaction
-        )
-        usdc_approve_tx_receipt = web3.eth.wait_for_transaction_receipt(
-            send_usdc_approve_tx, 600
-        )
-        print(usdc_approve_tx_receipt)
-
-        nonce = web3.eth.get_transaction_count(pub_key)
-
-        raw_ctf_approval_txn = ctf.functions.setApprovalForAll(
-            "0xC5d563A36AE78145C45a50134d48A1215220f80a", True
-        ).build_transaction({"chainId": chain_id, "from": pub_key, "nonce": nonce})
-        signed_ctf_approval_tx = web3.eth.account.sign_transaction(
-            raw_ctf_approval_txn, private_key=priv_key
-        )
-        send_ctf_approval_tx = web3.eth.send_raw_transaction(
-            signed_ctf_approval_tx.raw_transaction
-        )
-        ctf_approval_tx_receipt = web3.eth.wait_for_transaction_receipt(
-            send_ctf_approval_tx, 600
-        )
-        print(ctf_approval_tx_receipt)
-
-        nonce = web3.eth.get_transaction_count(pub_key)
-
-        # Neg Risk Adapter
-        raw_usdc_approve_txn = usdc.functions.approve(
-            "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296", int(MAX_INT, 0)
-        ).build_transaction({"chainId": chain_id, "from": pub_key, "nonce": nonce})
-        signed_usdc_approve_tx = web3.eth.account.sign_transaction(
-            raw_usdc_approve_txn, private_key=priv_key
-        )
-        send_usdc_approve_tx = web3.eth.send_raw_transaction(
-            signed_usdc_approve_tx.raw_transaction
-        )
-        usdc_approve_tx_receipt = web3.eth.wait_for_transaction_receipt(
-            send_usdc_approve_tx, 600
-        )
-        print(usdc_approve_tx_receipt)
-
-        nonce = web3.eth.get_transaction_count(pub_key)
-
-        raw_ctf_approval_txn = ctf.functions.setApprovalForAll(
-            "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296", True
-        ).build_transaction({"chainId": chain_id, "from": pub_key, "nonce": nonce})
-        signed_ctf_approval_tx = web3.eth.account.sign_transaction(
-            raw_ctf_approval_txn, private_key=priv_key
-        )
-        send_ctf_approval_tx = web3.eth.send_raw_transaction(
-            signed_ctf_approval_tx.raw_transaction
-        )
-        ctf_approval_tx_receipt = web3.eth.wait_for_transaction_receipt(
-            send_ctf_approval_tx, 600
-        )
-        print(ctf_approval_tx_receipt)
-
-    def get_all_markets(self) -> "list[SimpleMarket]":
-        markets = []
-        res = httpx.get(self.gamma_markets_endpoint)
-        if res.status_code == 200:
-            for market in res.json():
-                try:
-                    simple_market = self.map_api_to_market(market)
-                    markets.append(simple_market)
-                except Exception as e:
-                    print(e)
-                    pass
-        return markets
-
-    def filter_markets_for_trading(self, markets: "list[SimpleMarket]"):
-        tradeable_markets = []
-        for market in markets:
-            if market.active:
-                tradeable_markets.append(market)
-        return tradeable_markets
-
-    def get_market(self, token_id: str) -> SimpleMarket | None:
-        params = {"clob_token_ids": token_id}
-        res = httpx.get(self.gamma_markets_endpoint, params=params)
-        if res.status_code == 200:
-            data = res.json()
-            market = data[0]
-            return self.map_api_to_market(market, token_id)
-        return None
-
-    def map_api_to_market(self, market, token_id: str = "") -> SimpleMarket:
-        market_data = {
-            "id": int(market["id"]),
-            "question": market["question"],
-            "end": market["endDate"],
-            "description": market["description"],
-            "active": market["active"],
-            # "deployed": market["deployed"],
-            "funded": market["funded"],
-            "rewardsMinSize": float(market["rewardsMinSize"]),
-            "rewardsMaxSpread": float(market["rewardsMaxSpread"]),
-            # "volume": float(market["volume"]),
-            "spread": float(market["spread"]),
-            "outcomes": str(market["outcomes"]),
-            "outcome_prices": str(market["outcomePrices"]),
-            "clob_token_ids": str(market["clobTokenIds"]),
-        }
-        if token_id:
-            market_data["clob_token_ids"] = token_id
-        return SimpleMarket(**market_data)
-
-    def get_all_events(self) -> "list[SimpleEvent]":
-        """Get all events from Gamma API"""
-        try:
-            params = {
-                "active": "true",
-                "closed": "false",
-                "archived": "false",
-                "limit": "100",
-                "order": "volume",
-                "ascending": "false",
-            }
-
-            res = httpx.get(
-                f"{self.gamma_url}/markets",
-                params=params,
-                headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"},
-                timeout=30.0,
-            )
-
-            if res.status_code == 200:
-                markets = res.json()
-                if markets:
-                    events = []
-                    for market in markets:
-                        if float(market.get("volume", 0)) > 10000:
-                            event_data = {
-                                "id": str(market.get("id")),
-                                "title": market.get("question", ""),
-                                "description": market.get("description", ""),
-                                "markets": str(market.get("id", "")),
-                                "metadata": {
-                                    "question": market.get("question", ""),
-                                    "markets": str(market.get("id", "")),
-                                    "volume": float(market.get("volume", 0)),
-                                    "featured": market.get("featured", False),
-                                    "outcome_prices": market.get("outcomePrices", "[]"),
-                                    "outcomes": market.get("outcomes", "[]"),
-                                },
-                            }
-                            events.append(SimpleEvent(**event_data))
-
-                    print("\nTop mercados por volumen total:")
-                    for market in markets[:5]:
-                        print(
-                            f"- {market.get('question')}: ${float(market.get('volume', 0)):,.2f}"
-                        )
-
-                    return events
-
-            return []
-        except Exception as e:
-            print(f"Error getting events: {e}")
-            return []
-
-    def get_all_tradeable_events(self) -> "list[SimpleEvent]":
-        try:
-            params = {
-                "active": "true",
-                "closed": "false",
-                "archived": "false",
-                "limit": "100",
-                "order": "volume",
-                "ascending": "false",
-            }
-
-            res = httpx.get(
-                f"{self.gamma_url}/markets",
-                params=params,
-                headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"},
-                timeout=30.0,
-            )
-
-            if res.status_code == 200:
-                markets = res.json()
-                if markets:
-                    events = []
-                    for market in markets:
-                        # Solo considerar mercados con volumen significativo
-                        if float(market.get("volume", 0)) > 10000:
-                            event_data = {
-                                "id": str(market.get("id")),  # Convertir a string
-                                "title": market.get("question", ""),
-                                "description": market.get("description", ""),
-                                "markets": str(market.get("id", "")),
-                                "metadata": {
-                                    "question": market.get("question", ""),
-                                    "markets": str(market.get("id", "")),
-                                    "volume": float(market.get("volume", 0)),
-                                    "featured": market.get("featured", False),
-                                    "outcome_prices": market.get("outcomePrices", "[]"),
-                                    "outcomes": market.get("outcome", "[]"),
-                                },
-                            }
-                            event = SimpleEvent(**event_data)
-                            events.append(event)
-
-                    print("\nTop mercados por volumen total:")
-                    for market in markets[:5]:
-                        print(
-                            f"- {market.get('question')}: ${float(market.get('volume', 0)):,.2f}"
-                        )
-
-                    return events
-            return []
-        except Exception as e:
-            print(f"❌ Error getting events: {e!s}")
-            return []
-
-    def get_sampling_simplified_markets(self) -> "list[SimpleMarket]":
-        markets = []
-        raw_sampling_simplified_markets = self.client.get_sampling_simplified_markets()
-        for raw_market in raw_sampling_simplified_markets["data"]:
-            token_one_id = raw_market["tokens"][0]["token_id"]
-            market = self.get_market(token_one_id)
-            if market is not None:
-                markets.append(market)
-        return markets
-
-    def get_orderbook(self, token_id: str) -> OrderBookSummary:
-        return self.client.get_order_book(token_id)
-
-    def get_orderbook_price(self, token_id: str) -> float:
-        return float(self.client.get_price(token_id))
-
-    def get_address_for_private_key(self):
-        account = self.w3.eth.account.from_key(str(self.private_key))
-        return account.address
-
-    def build_order(
-        self,
-        market_token: str,
-        amount: float,
-        nonce: str = str(round(time.time())),  # for cancellations
-        side: str = "BUY",
-        expiration: str = "0",  # timestamp after which order expires
-    ):
-        signer = Signer(self.private_key)
-        builder = OrderBuilder(self.exchange_address, self.chain_id, signer)
-
-        buy = side == "BUY"
-        side_int = 0 if buy else 1
-        maker_amount = amount if buy else 0
-        taker_amount = amount if not buy else 0
-        order_data = OrderData(
-            maker=self.get_address_for_private_key(),
-            tokenId=market_token,
-            makerAmount=maker_amount,
-            takerAmount=taker_amount,
-            feeRateBps="1",
-            nonce=nonce,
-            side=side_int,
-            expiration=expiration,
-        )
-        order = builder.build_signed_order(order_data)
-        return order
-
-    def execute_order(self, price, size, side, token_id) -> str:
-        return self.client.create_and_post_order(
-            OrderArgs(price=price, size=size, side=side, token_id=token_id)
-        )
-
-    def get_token_balance(self, token_id: str) -> float:
-        """Get balance of a specific outcome token"""
-        try:
-            # ERC1155 balance ABI
-            erc1155_abi = """[{
+        # ERC1155 合约 ABI (CTF tokens)
+        erc1155_abi = [
+            {
                 "inputs": [
                     {"internalType": "address", "name": "account", "type": "address"},
-                    {"internalType": "uint256", "name": "id", "type": "uint256"}
+                    {"internalType": "uint256", "name": "id", "type": "uint256"},
                 ],
                 "name": "balanceOf",
                 "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
                 "stateMutability": "view",
-                "type": "function"
-            }]"""
+                "type": "function",
+            },
+            {
+                "inputs": [
+                    {"internalType": "address", "name": "operator", "type": "address"},
+                    {"internalType": "bool", "name": "approved", "type": "bool"},
+                ],
+                "name": "setApprovalForAll",
+                "outputs": [],
+                "stateMutability": "nonpayable",
+                "type": "function",
+            },
+        ]
 
-            # CTF token contract address
-            ctf_address = Web3.to_checksum_address(
-                "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
-            )
+        # 创建合约实例
+        self.usdc_contract = self.w3.eth.contract(
+            address=self.contract_addresses["usdc"], abi=usdc_abi
+        )
 
-            # Create contract
-            ctf = self.w3.eth.contract(address=ctf_address, abi=erc1155_abi)
+        self.ctf_contract = self.w3.eth.contract(
+            address=self.contract_addresses["ctf"], abi=erc1155_abi
+        )
 
-            # Get balance
-            balance = ctf.functions.balanceOf(self.wallet_address, int(token_id)).call()
-            return float(balance)
+    def _get_wallet_address(self) -> str:
+        """从私钥获取钱包地址"""
+        account = self.w3.eth.account.from_key(self.private_key)
+        return account.address
 
-        except Exception as e:
-            print(f"Error getting token balance: {e}")
-            return 0.0
+    # =============================================================================
+    # 市场数据接口
+    # =============================================================================
 
-    def execute_market_order(self, market, amount):
+    def get_markets(
+        self, active_only: bool = True, limit: int = 100
+    ) -> list[MarketInfo]:
+        """
+        获取市场列表
+
+        Args:
+            active_only: 是否只返回活跃市场
+            limit: 返回数量限制
+
+        Returns:
+            市场信息列表
+        """
         try:
-            # Obtener datos del mercado usando los atributos correctos
-            token_ids = ast.literal_eval(
-                market.clob_token_ids
-            )  # Usar el atributo directamente
+            params = {
+                "active": "true" if active_only else "false",
+                "limit": str(limit),
+                "order": "volume",
+                "ascending": "false",
+            }
 
-            # Si el trade dice SELL -> compramos NO
-            # Si el trade dice BUY -> compramos YES
-            if hasattr(market, "trade") and market.trade.get("side") == "SELL":
-                token_id = token_ids[0]  # Token NO
-                position = "NO"
-            else:
-                token_id = token_ids[1]  # Token YES
-                position = "YES"
-
-            # Verificar si ya tenemos una posición
-            current_balance = self.get_token_balance(token_id)
-            if current_balance > 0:
-                print(
-                    f"Already have position in this market: {current_balance} {position} tokens"
-                )
-                return None
-
-            # Obtener el precio actual del mercado
-            market_price_resp = self.client.get_price(token_id, "SELL")
-            market_price = float(market_price_resp.get("price", 0))
-            print(f"Current market price for {position}: ${market_price}")
-
-            # Obtener el orderbook para ver las órdenes disponibles
-            orderbook = self.client.get_order_book(token_id)
-
-            # Calcular el tamaño mínimo requerido en tokens
-            min_size = 5.0  # Tamaño mínimo en tokens
-            min_cost = min_size * market_price  # Costo mínimo en USDC
-
-            print(f"Creating order for {position} position:")
-            print(f"Token ID: {token_id}")
-            print(f"Market price: ${market_price}")
-            print(f"Minimum size: {min_size} tokens")
-            print(f"Minimum cost: ${min_cost:.4f} USDC")
-
-            # Crear orden usando OrderArgs
-            order_args = OrderArgs(
-                token_id=token_id,
-                size=min_size,
-                price=market_price,
-                side=BUY,  # Siempre compramos (YES o NO)
+            response = httpx.get(
+                f"{self.gamma_url}/markets", params=params, timeout=30.0
             )
 
-            # Crear y firmar la orden
-            signed_order = self.client.create_order(order_args)
-            print("Signed order created:", signed_order)
+            if response.status_code != 200:
+                raise PolymarketError(
+                    f"Failed to fetch markets: {response.status_code}"
+                )
 
-            # Postear la orden
-            resp = self.client.post_order(signed_order)
-            print("Order response:", resp)
-            print("Done!")
+            markets = []
+            for market_data in response.json():
+                try:
+                    market = self._parse_market_data(market_data)
+                    markets.append(market)
+                except Exception as e:
+                    self.logger.warning(
+                        f"Failed to parse market {market_data.get('id', 'unknown')}: {e}"
+                    )
+                    continue
 
-            if self.dry_run:
-                print(f"\n✅ DRY RUN: Order would be executed with these parameters:")
-                print(f"   Token ID: {token_id}")
-                print(f"   Position: {position}")
-                print(f"   Size: {min_size} tokens")
-                print(f"   Price: ${market_price}")
-                print(f"   Total Cost: ${min_cost:.4f} USDC")
-                return {"status": "simulated", "dry_run": True}
-
-            return resp
+            self.logger.info(f"Retrieved {len(markets)} markets")
+            return markets
 
         except Exception as e:
-            print(f"Error executing market order: {e}")
-            print(f"Full error details: {e!s}")
+            raise PolymarketError(f"Error fetching markets: {e}") from e
+
+    def _parse_market_data(self, data: dict[str, Any]) -> MarketInfo:
+        """解析市场数据"""
+        return MarketInfo(
+            id=str(data["id"]),
+            question=data["question"],
+            description=data.get("description", ""),
+            end_date=data["endDate"],
+            active=data["active"],
+            funded=data["funded"],
+            volume=float(data.get("volume", 0)),
+            spread=float(data.get("spread", 0)),
+            outcomes=data.get("outcomes", []),
+            outcome_prices=[float(p) for p in data.get("outcomePrices", [])],
+            token_ids=data.get("clobTokenIds", []),
+        )
+
+    def get_market_by_token_id(self, token_id: str) -> MarketInfo | None:
+        """
+        根据代币ID获取市场信息
+
+        Args:
+            token_id: 代币ID
+
+        Returns:
+            市场信息或None
+        """
+        try:
+            params = {"clob_token_ids": token_id}
+            response = httpx.get(
+                f"{self.gamma_url}/markets", params=params, timeout=30.0
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                if data:
+                    return self._parse_market_data(data[0])
             return None
 
-    def check_usdc_allowance(self) -> float:
-        """Check how much USDC we've approved for spending"""
-        try:
-            allowance = self.usdc.functions.allowance(
-                Web3.to_checksum_address(self.wallet_address),
-                Web3.to_checksum_address(self.exchange_address),
-            ).call()
-            return float(allowance) / 1_000_000  # Convertir de wei a USDC
         except Exception as e:
-            print(f"Error checking allowance: {e}")
+            self.logger.error(f"Error fetching market for token {token_id}: {e}")
+            return None
+
+    def get_high_volume_markets(self, min_volume: float = 10000) -> list[MarketInfo]:
+        """
+        获取高交易量市场
+
+        Args:
+            min_volume: 最小交易量阈值
+
+        Returns:
+            高交易量市场列表
+        """
+        all_markets = self.get_markets()
+        return [m for m in all_markets if m.volume >= min_volume]
+
+    def search_markets(self, query: str, limit: int = 20) -> list[MarketInfo]:
+        """
+        搜索市场
+
+        Args:
+            query: 搜索关键词
+            limit: 返回数量限制
+
+        Returns:
+            匹配的市场列表
+        """
+        all_markets = self.get_markets(limit=limit * 3)  # 获取更多结果进行筛选
+        query = query.lower()
+
+        # 简单的文本匹配搜索
+        matching_markets = []
+        for market in all_markets:
+            if query in market.question.lower() or query in market.description.lower():
+                matching_markets.append(market)
+
+        return matching_markets[:limit]
+
+    # =============================================================================
+    # 订单簿和价格数据
+    # =============================================================================
+
+    def get_orderbook(self, token_id: str) -> OrderBookSummary:
+        """
+        获取订单簿
+
+        Args:
+            token_id: 代币ID
+
+        Returns:
+            订单簿摘要
+        """
+        try:
+            return self.client.get_order_book(token_id)
+        except Exception as e:
+            raise PolymarketError(
+                f"Failed to get orderbook for token {token_id}: {e}"
+            ) from e
+
+    def get_price(self, token_id: str, side: str = "BUY") -> float:
+        """
+        获取代币价格
+
+        Args:
+            token_id: 代币ID
+            side: 买卖方向 ("BUY" 或 "SELL")
+
+        Returns:
+            价格
+        """
+        try:
+            response = self.client.get_price(token_id, side)
+            return float(response.get("price", 0))
+        except Exception as e:
+            raise PolymarketError(
+                f"Failed to get price for token {token_id}: {e}"
+            ) from e
+
+    def get_last_trade_price(self, token_id: str) -> float:
+        """
+        获取最后成交价格
+
+        Args:
+            token_id: 代币ID
+
+        Returns:
+            最后成交价格
+        """
+        try:
+            response = self.client.get_last_trade_price(token_id=token_id)
+            price = response.get("price")
+            if price is not None:
+                return float(price)
+            else:
+                raise PolymarketError("Last trade price not available") from None
+        except Exception as e:
+            raise PolymarketError(
+                f"Failed to get last trade price for token {token_id}: {e}"
+            ) from e
+
+    def get_mid_price(self, token_id: str) -> float:
+        """
+        获取中间价格（买一和卖一的平均值）
+
+        Args:
+            token_id: 代币ID
+
+        Returns:
+            中间价格
+        """
+        try:
+            orderbook = self.get_orderbook(token_id)
+            if orderbook.bids and orderbook.asks:
+                best_bid = float(orderbook.bids[0].price)
+                best_ask = float(orderbook.asks[0].price)
+                return (best_bid + best_ask) / 2
+            else:
+                # 如果没有订单簿数据，返回最后成交价
+                return self.get_last_trade_price(token_id)
+        except Exception as e:
+            self.logger.warning(
+                f"Failed to calculate mid price for token {token_id}: {e}"
+            )
             return 0.0
 
-    def approve_usdc_spend(self, amount: float):
-        """Approve USDC spending"""
+    def get_spread(self, token_id: str) -> dict[str, float]:
+        """
+        获取买卖价差信息
+
+        Args:
+            token_id: 代币ID
+
+        Returns:
+            包含价差信息的字典
+        """
         try:
-            # Convertir el monto a la unidad correcta (6 decimales para USDC)
-            amount_wei = int(amount * 1_000_000)  # Convertir a unidades USDC
+            orderbook = self.get_orderbook(token_id)
+            if orderbook.bids and orderbook.asks:
+                best_bid = float(orderbook.bids[0].price)
+                best_ask = float(orderbook.asks[0].price)
+                spread = best_ask - best_bid
+                spread_pct = (
+                    (spread / ((best_bid + best_ask) / 2)) * 100
+                    if (best_bid + best_ask) > 0
+                    else 0
+                )
 
-            # Convertir direcciones a checksum
-            exchange_address = Web3.to_checksum_address(self.exchange_address)
-            wallet_address = Web3.to_checksum_address(self.wallet_address)
+                return {
+                    "best_bid": best_bid,
+                    "best_ask": best_ask,
+                    "spread": spread,
+                    "spread_pct": spread_pct,
+                    "mid_price": (best_bid + best_ask) / 2,
+                }
+            else:
+                return {
+                    "best_bid": 0.0,
+                    "best_ask": 0.0,
+                    "spread": 0.0,
+                    "spread_pct": 0.0,
+                    "mid_price": 0.0,
+                }
+        except Exception as e:
+            self.logger.error(f"Failed to get spread for token {token_id}: {e}")
+            return {
+                "best_bid": 0.0,
+                "best_ask": 0.0,
+                "spread": 0.0,
+                "spread_pct": 0.0,
+                "mid_price": 0.0,
+            }
 
-            print(f"Approving {amount} USDC ({amount_wei} wei) for {exchange_address}")
+    def get_market_depth(self, token_id: str, levels: int = 5) -> dict[str, Any]:
+        """
+        获取市场深度信息
 
-            # Construir la transacción de aprobación usando el contrato directamente
-            approve_txn = self.usdc.functions.approve(
-                exchange_address, amount_wei
+        Args:
+            token_id: 代币ID
+            levels: 显示深度层级
+
+        Returns:
+            市场深度信息
+        """
+        try:
+            orderbook = self.get_orderbook(token_id)
+
+            bids = []
+            asks = []
+
+            # 处理买单
+            for i, bid in enumerate(orderbook.bids[:levels]):
+                bids.append(
+                    {"price": float(bid.price), "size": float(bid.size), "level": i + 1}
+                )
+
+            # 处理卖单
+            for i, ask in enumerate(orderbook.asks[:levels]):
+                asks.append(
+                    {"price": float(ask.price), "size": float(ask.size), "level": i + 1}
+                )
+
+            return {
+                "token_id": token_id,
+                "bids": bids,
+                "asks": asks,
+                "total_bid_size": sum(float(bid.size) for bid in orderbook.bids),
+                "total_ask_size": sum(float(ask.size) for ask in orderbook.asks),
+                "levels": levels,
+            }
+
+        except Exception as e:
+            self.logger.error(f"Failed to get market depth for token {token_id}: {e}")
+            return {
+                "token_id": token_id,
+                "bids": [],
+                "asks": [],
+                "total_bid_size": 0,
+                "total_ask_size": 0,
+                "levels": 0,
+            }
+
+    # =============================================================================
+    # 交易接口
+    # =============================================================================
+
+    def create_limit_order(
+        self,
+        token_id: str,
+        side: str,
+        size: float,
+        price: float,
+        order_type: OrderType = OrderType.GTC,
+    ) -> dict[str, Any] | None:
+        """
+        创建限价订单
+
+        Args:
+            token_id: 代币ID
+            side: 买卖方向 ("BUY" 或 "SELL")
+            size: 订单数量
+            price: 订单价格
+            order_type: 订单类型
+
+        Returns:
+            订单响应或None
+        """
+        try:
+            if self.dry_run:
+                self.logger.info(
+                    f"DRY RUN: Would create {side} order for {size} tokens at ${price}"
+                )
+                return {
+                    "status": "simulated",
+                    "dry_run": True,
+                    "order": {
+                        "token_id": token_id,
+                        "side": side,
+                        "size": size,
+                        "price": price,
+                        "type": (
+                            order_type.value
+                            if hasattr(order_type, "value")
+                            else str(order_type)
+                        ),
+                    },
+                }
+
+            # 创建订单参数
+            order_args = OrderArgs(
+                token_id=token_id,
+                size=size,
+                price=price,
+                side=BUY if side.upper() == "BUY" else SELL,
+            )
+
+            # 创建并签名订单
+            signed_order = self.client.create_order(order_args)
+
+            # 发布订单
+            response = self.client.post_order(signed_order, orderType=order_type)
+
+            self.logger.info(f"Created {side} order for {size} tokens at ${price}")
+            return response
+
+        except Exception as e:
+            self.logger.error(f"Failed to create limit order: {e}")
+            if not self.dry_run:
+                raise PolymarketError(f"Failed to create limit order: {e}") from e
+            return None
+
+    def create_market_order(
+        self, token_id: str, side: str, amount: float
+    ) -> dict[str, Any] | None:
+        """
+        创建市价订单
+
+        Args:
+            token_id: 代币ID
+            side: 买卖方向 ("BUY" 或 "SELL")
+            amount: 订单金额 (USD)
+
+        Returns:
+            订单响应或None
+        """
+        try:
+            if self.dry_run:
+                self.logger.info(
+                    f"DRY RUN: Would create market {side} order for ${amount}"
+                )
+                return {
+                    "status": "simulated",
+                    "dry_run": True,
+                    "order": {
+                        "token_id": token_id,
+                        "side": side,
+                        "amount": amount,
+                        "type": "market",
+                    },
+                }
+
+            # 创建市价订单参数
+            order_args = MarketOrderArgs(
+                token_id=token_id,
+                amount=amount,
+                side=BUY if side.upper() == "BUY" else SELL,
+            )
+
+            # 创建并签名订单
+            signed_order = self.client.create_market_order(order_args)
+
+            # 发布订单 (市价订单使用FOK类型)
+            response = self.client.post_order(signed_order, orderType=OrderType.FOK)
+
+            self.logger.info(f"Created market {side} order for ${amount}")
+            return response
+
+        except Exception as e:
+            self.logger.error(f"Failed to create market order: {e}")
+            if not self.dry_run:
+                raise PolymarketError(f"Failed to create market order: {e}") from e
+            return None
+
+    def get_orders(self, market: str | None = None) -> list[dict[str, Any]]:
+        """
+        获取订单列表
+
+        Args:
+            market: 市场ID (可选)
+
+        Returns:
+            订单列表
+        """
+        try:
+            if market:
+                return self.client.get_orders(market=market)
+            else:
+                return self.client.get_orders()
+        except Exception as e:
+            self.logger.error(f"Failed to get orders: {e}")
+            return []
+
+    def get_order(self, order_id: str) -> dict[str, Any] | None:
+        """
+        获取单个订单信息
+
+        Args:
+            order_id: 订单ID
+
+        Returns:
+            订单信息或None
+        """
+        try:
+            return self.client.get_order(order_id)
+        except Exception as e:
+            self.logger.error(f"Failed to get order {order_id}: {e}")
+            return None
+
+    def cancel_order(self, order_id: str) -> dict[str, Any] | None:
+        """
+        取消订单
+
+        Args:
+            order_id: 订单ID
+
+        Returns:
+            取消响应或None
+        """
+        try:
+            if self.dry_run:
+                self.logger.info(f"DRY RUN: Would cancel order {order_id}")
+                return {"status": "simulated", "dry_run": True, "order_id": order_id}
+
+            response = self.client.cancel(order_id)
+            self.logger.info(f"Cancelled order {order_id}")
+            return response
+        except Exception as e:
+            self.logger.error(f"Failed to cancel order {order_id}: {e}")
+            if not self.dry_run:
+                raise PolymarketError(f"Failed to cancel order {order_id}: {e}") from e
+            return None
+
+    def cancel_all_orders(self, market: str | None = None) -> dict[str, Any] | None:
+        """
+        取消所有订单
+
+        Args:
+            market: 市场ID (可选，如果提供则只取消该市场的订单)
+
+        Returns:
+            取消响应或None
+        """
+        try:
+            if self.dry_run:
+                self.logger.info(
+                    f"DRY RUN: Would cancel all orders for market {market}"
+                )
+                return {"status": "simulated", "dry_run": True, "market": market}
+
+            response = self.client.cancel_all()
+            self.logger.info("Cancelled all orders")
+            return response
+        except Exception as e:
+            self.logger.error(f"Failed to cancel all orders: {e}")
+            if not self.dry_run:
+                raise PolymarketError(f"Failed to cancel all orders: {e}") from e
+            return None
+
+    # =============================================================================
+    # 余额和授权管理
+    # =============================================================================
+
+    def get_usdc_balance(self) -> float:
+        """
+        获取 USDC 余额
+
+        Returns:
+            USDC 余额
+        """
+        try:
+            balance_info = self.client.get_balance_allowance(
+                params=BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            )
+            balance = float(balance_info.get("balance", 0))
+            self.logger.debug(f"USDC balance: ${balance}")
+            return balance
+        except Exception as e:
+            self.logger.error(f"Failed to get USDC balance: {e}")
+            return 0.0
+
+    def get_token_balance(self, token_id: str) -> float:
+        """
+        获取指定代币余额
+
+        Args:
+            token_id: 代币ID
+
+        Returns:
+            代币余额
+        """
+        try:
+            balance_info = self.client.get_balance_allowance(
+                params=BalanceAllowanceParams(
+                    asset_type=AssetType.CONDITIONAL, token_id=token_id
+                )
+            )
+            balance = float(balance_info.get("balance", 0))
+            self.logger.debug(f"Token {token_id} balance: {balance}")
+            return balance
+        except Exception as e:
+            self.logger.error(f"Failed to get token balance for {token_id}: {e}")
+            return 0.0
+
+    def get_all_balances(self) -> BalanceInfo:
+        """
+        获取所有余额信息
+
+        Returns:
+            余额信息
+        """
+        try:
+            usdc_balance = self.get_usdc_balance()
+
+            # 获取所有代币余额 (这里简化处理，实际可能需要遍历所有持有的代币)
+            token_balances: dict[str, float] = {}
+            allowances: dict[str, float] = {}
+
+            # 从已知的订单或市场中获取代币余额
+            # 这里只是一个示例，实际实现可能需要更复杂的逻辑
+
+            return BalanceInfo(
+                usdc_balance=usdc_balance,
+                token_balances=token_balances,
+                allowances=allowances,
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to get all balances: {e}")
+            return BalanceInfo(usdc_balance=0.0, token_balances={}, allowances={})
+
+    def check_usdc_allowance(self) -> float:
+        """
+        检查 USDC 授权额度
+
+        Returns:
+            当前授权额度
+        """
+        try:
+            allowance = self.usdc_contract.functions.allowance(
+                Web3.to_checksum_address(self.wallet_address),
+                Web3.to_checksum_address(self.contract_addresses["exchange"]),
+            ).call()
+            allowance_usdc = float(allowance) / 1_000_000  # 转换为 USDC 单位
+            self.logger.debug(f"USDC allowance: ${allowance_usdc}")
+            return allowance_usdc
+        except Exception as e:
+            self.logger.error(f"Failed to check USDC allowance: {e}")
+            return 0.0
+
+    def approve_usdc(self, amount: float | None = None) -> bool:
+        """
+        授权 USDC 使用
+
+        Args:
+            amount: 授权金额，如果为None则使用最大值
+
+        Returns:
+            是否成功
+        """
+        try:
+            if self.dry_run:
+                self.logger.info(
+                    f"DRY RUN: Would approve USDC spending: ${amount or 'MAX'}"
+                )
+                return True
+
+            # 确定授权金额
+            if amount is None:
+                amount_wei = int(MAX_INT, 0)
+                self.logger.info("Approving maximum USDC allowance")
+            else:
+                amount_wei = int(amount * 1_000_000)  # 转换为 USDC 单位
+                self.logger.info(f"Approving ${amount} USDC allowance")
+
+            # 构建交易
+            wallet_checksum = Web3.to_checksum_address(self.wallet_address)
+            approve_txn = self.usdc_contract.functions.approve(
+                self.contract_addresses["exchange"], amount_wei
             ).build_transaction(
                 {
-                    "from": wallet_address,
-                    "nonce": self.w3.eth.get_transaction_count(wallet_address),
+                    "from": wallet_checksum,
+                    "nonce": self.w3.eth.get_transaction_count(wallet_checksum),
                     "gas": 100000,
                     "gasPrice": self.w3.eth.gas_price,
                     "chainId": self.chain_id,
                 }
             )
 
-            # Firmar la transacción
+            # 签名并发送交易
             signed_txn = self.w3.eth.account.sign_transaction(
                 approve_txn, private_key=self.private_key
             )
-
-            # Enviar la transacción - usar raw_transaction en lugar de rawTransaction
             tx_hash = self.w3.eth.send_raw_transaction(signed_txn.raw_transaction)
-            print(f"Approval transaction sent: {tx_hash.hex()}")
 
-            # Esperar a que se confirme
+            # 等待确认
             receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
-            print(f"Approval confirmed in block: {receipt['blockNumber']}")
-
-            # Verificar el nuevo allowance
-            new_allowance = self.check_usdc_allowance()
-            print(f"New allowance: ${new_allowance}")
-
-            return True
-
-        except Exception as e:
-            print(f"Error approving USDC: {e}")
-            print(f"Full error details: {e!s}")
-            import traceback
-
-            print(f"Stack trace: {traceback.format_exc()}")
-            return False
-
-    def get_usdc_balance(self) -> float:
-        """Get USDC balance for the current wallet"""
-        try:
-            # Verificar que la wallet está configurada
-            if not self.wallet_address:
-                print("Wallet address not configured")
-                return 0.0
-
-            # Obtener balance
-            balance_res = self.usdc.functions.balanceOf(self.wallet_address).call()
-            balance = float(balance_res) / 1_000_000  # USDC tiene 6 decimales
-
-            print(f"Raw balance: {balance_res}")
-            print(f"Wallet: {self.wallet_address}")
-            print(f"USDC Contract: {self.usdc_address}")
-
-            return balance
-
-        except Exception as e:
-            print(f"Error getting USDC balance: {e}")
-            print(f"Wallet: {self.wallet_address}")
-            return 0.0
-
-    def get_outcome_token_balance(self, token_id: str) -> float:
-        """Get outcome token balance for the current wallet"""
-        try:
-            # TODO: Implementar verificación de balance de tokens outcome usando el contrato ERC1155
-            return 0.0
-        except Exception as e:
-            print(f"Error getting outcome token balance: {e}")
-            return 0.0
-
-    def check_outcome_token_allowance(self, token_id: str) -> float:
-        """Check outcome token allowance"""
-        try:
-            # TODO: Implementar verificación de allowance de tokens outcome
-            return 0.0
-        except Exception as e:
-            print(f"Error checking outcome token allowance: {e}")
-            return 0.0
-
-    def approve_outcome_token_spend(self, token_id: str, amount: float):
-        """Approve outcome token spending"""
-        try:
-            # TODO: Implementar aprobación de gasto de tokens outcome
-            return False
-        except Exception as e:
-            print(f"Error approving outcome token spend: {e}")
-            return False
-
-    def set_all_allowances(self):
-        """Set all necessary allowances for trading"""
-        try:
-            print("Setting allowances for all contracts...")
-
-            # Addresses
-            ctf_address = Web3.to_checksum_address(
-                "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
-            )
-            exchange_address = Web3.to_checksum_address(
-                "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
-            )
-            neg_risk_exchange = Web3.to_checksum_address(
-                "0xC5d563A36AE78145C45a50134d48A1215220f80a"
-            )
-            neg_risk_adapter = Web3.to_checksum_address(
-                "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
+            self.logger.info(
+                f"USDC approval confirmed in block: {receipt['blockNumber']}"
             )
 
-            # ERC1155 approval ABI
-            erc1155_abi = """[{
-                "inputs": [
-                    {"internalType": "address", "name": "operator", "type": "address"},
-                    {"internalType": "bool", "name": "approved", "type": "bool"}
-                ],
-                "name": "setApprovalForAll",
-                "outputs": [],
-                "stateMutability": "nonpayable",
-                "type": "function"
-            }]"""
-
-            # Create CTF contract
-            ctf = self.w3.eth.contract(address=ctf_address, abi=erc1155_abi)
-
-            # Get current nonce
-            nonce = self.w3.eth.get_transaction_count(self.wallet_address)
-
-            # Approve USDC for all contracts
-            for contract in [exchange_address, neg_risk_exchange, neg_risk_adapter]:
-                print(f"\nApproving USDC for {contract}...")
-
-                # Build USDC approval transaction
-                approve_txn = self.usdc.functions.approve(
-                    contract, int(MAX_INT, 0)  # Approve maximum amount
-                ).build_transaction(
-                    {
-                        "chainId": self.chain_id,
-                        "from": self.wallet_address,
-                        "nonce": nonce,
-                        "gas": 100000,
-                        "gasPrice": self.w3.eth.gas_price,
-                    }
-                )
-
-                # Sign and send transaction
-                signed_txn = self.w3.eth.account.sign_transaction(
-                    approve_txn, private_key=self.private_key
-                )
-                tx_hash = self.w3.eth.send_raw_transaction(signed_txn.raw_transaction)
-                receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
-                print(f"USDC approval confirmed in block {receipt['blockNumber']}")
-
-                nonce += 1
-
-                # Approve CTF tokens
-                print(f"Approving CTF tokens for {contract}...")
-                ctf_txn = ctf.functions.setApprovalForAll(
-                    contract, True
-                ).build_transaction(
-                    {
-                        "chainId": self.chain_id,
-                        "from": self.wallet_address,
-                        "nonce": nonce,
-                        "gas": 100000,
-                        "gasPrice": self.w3.eth.gas_price,
-                    }
-                )
-
-                # Sign and send transaction
-                signed_txn = self.w3.eth.account.sign_transaction(
-                    ctf_txn, private_key=self.private_key
-                )
-                tx_hash = self.w3.eth.send_raw_transaction(signed_txn.raw_transaction)
-                receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
-                print(f"CTF approval confirmed in block {receipt['blockNumber']}")
-
-                nonce += 1
-
-            print("\nAll allowances set successfully!")
-            return True
+            return receipt["status"] == 1
 
         except Exception as e:
-            print(f"Error setting allowances: {e}")
+            self.logger.error(f"Failed to approve USDC: {e}")
+            if not self.dry_run:
+                raise PolymarketError(f"Failed to approve USDC: {e}") from e
             return False
 
-    def get_pinned_markets(self) -> "list[SimpleEvent]":
-        """Get pinned markets from Gamma API"""
-        try:
-            # Obtener mercados pinned usando el endpoint específico o un filtro
-            params = {"pinned": True, "active": True, "closed": False}
-            response = httpx.get(self.gamma_markets_endpoint, params=params)
-            if response.status_code == 200:
-                markets = response.json()
-                return [SimpleEvent(**market) for market in markets]
-            return []
-        except Exception as e:
-            print(f"Error getting pinned markets: {e}")
-            return []
+    def set_ctf_approval(self, operator_address: str, approved: bool = True) -> bool:
+        """
+        设置 CTF 代币授权
 
-    def get_high_volume_markets(self, min_volume: float = 10000) -> "list[SimpleEvent]":
-        """Get markets with volume above threshold"""
-        events = self.get_all_events()
-        return [
-            event
-            for event in events
-            if event.active and not event.closed and float(event.volume) > min_volume
-        ]
+        Args:
+            operator_address: 操作者地址
+            approved: 是否授权
+
+        Returns:
+            是否成功
+        """
+        try:
+            if self.dry_run:
+                self.logger.info(
+                    f"DRY RUN: Would set CTF approval for {operator_address}: {approved}"
+                )
+                return True
+
+            # 构建交易
+            wallet_checksum = Web3.to_checksum_address(self.wallet_address)
+            approval_txn = self.ctf_contract.functions.setApprovalForAll(
+                operator_address, approved
+            ).build_transaction(
+                {
+                    "from": wallet_checksum,
+                    "nonce": self.w3.eth.get_transaction_count(wallet_checksum),
+                    "gas": 100000,
+                    "gasPrice": self.w3.eth.gas_price,
+                    "chainId": self.chain_id,
+                }
+            )
+
+            # 签名并发送交易
+            signed_txn = self.w3.eth.account.sign_transaction(
+                approval_txn, private_key=self.private_key
+            )
+            tx_hash = self.w3.eth.send_raw_transaction(signed_txn.raw_transaction)
+
+            # 等待确认
+            receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
+            self.logger.info(
+                f"CTF approval confirmed in block: {receipt['blockNumber']}"
+            )
+
+            return receipt["status"] == 1
+
+        except Exception as e:
+            self.logger.error(f"Failed to set CTF approval: {e}")
+            if not self.dry_run:
+                raise PolymarketError(f"Failed to set CTF approval: {e}") from e
+            return False
+
+    def setup_trading_permissions(self) -> bool:
+        """
+        设置所有必要的交易权限
+
+        Returns:
+            是否全部设置成功
+        """
+        try:
+            self.logger.info("Setting up trading permissions...")
+
+            success = True
+
+            # 授权 USDC 给主交易所
+            if not self.approve_usdc():
+                success = False
+
+            # 授权 CTF 代币给主交易所
+            if not self.set_ctf_approval(self.contract_addresses["exchange"]):
+                success = False
+
+            # 授权给负风险交易所
+            if not self.set_ctf_approval(self.contract_addresses["neg_risk_exchange"]):
+                success = False
+
+            # 授权给负风险适配器
+            if not self.set_ctf_approval(self.contract_addresses["neg_risk_adapter"]):
+                success = False
+
+            if success:
+                self.logger.info("All trading permissions set successfully")
+            else:
+                self.logger.warning("Some trading permissions failed to set")
+
+            return success
+
+        except Exception as e:
+            self.logger.error(f"Failed to setup trading permissions: {e}")
+            return False
+
+    # =============================================================================
+    # 工具函数和辅助方法
+    # =============================================================================
+
+    def adjust_price(self, price: float, adjustment: float = 0.001) -> float:
+        """
+        调整价格 (用于提高成交概率)
+
+        Args:
+            price: 原价格
+            adjustment: 调整幅度
+
+        Returns:
+            调整后的价格
+        """
+        # 买单价格稍微提高，卖单价格稍微降低
+        return round(max(0.001, min(0.999, price + adjustment)), 4)
+
+    def calculate_position_size(
+        self, available_balance: float, price: float, max_risk_pct: float = 0.1
+    ) -> float:
+        """
+        计算合适的仓位大小
+
+        Args:
+            available_balance: 可用余额
+            price: 交易价格
+            max_risk_pct: 最大风险比例
+
+        Returns:
+            建议的仓位大小
+        """
+        max_risk_amount = available_balance * max_risk_pct
+        position_size = max_risk_amount / price
+
+        # 确保最小交易量
+        min_size = 5.0
+        return max(min_size, position_size)
+
+    def get_market_summary(self, token_id: str) -> dict[str, Any]:
+        """
+        获取市场概况
+
+        Args:
+            token_id: 代币ID
+
+        Returns:
+            市场概况信息
+        """
+        try:
+            market = self.get_market_by_token_id(token_id)
+            if not market:
+                return {"error": "Market not found"}
+
+            spread_info = self.get_spread(token_id)
+            depth_info = self.get_market_depth(token_id, levels=3)
+
+            return {
+                "market": {
+                    "question": market.question,
+                    "volume": market.volume,
+                    "active": market.active,
+                },
+                "pricing": spread_info,
+                "depth": depth_info,
+                "last_trade": self.get_last_trade_price(token_id),
+            }
+
+        except Exception as e:
+            self.logger.error(f"Failed to get market summary for {token_id}: {e}")
+            return {"error": str(e)}
 
     def detect_category(self, question: str) -> str:
-        """Detecta la categoría de un mercado basado en su pregunta"""
+        """
+        检测市场类别
+
+        Args:
+            question: 市场问题
+
+        Returns:
+            市场类别
+        """
         question = question.lower()
 
-        # Keywords para cada categoría
-        politics_keywords = [
-            "election",
-            "president",
-            "vote",
-            "congress",
-            "senate",
-            "minister",
-            "government",
-            "fed",
-            "rate",
-            "chancellor",
-            "prime minister",
-        ]
-        sports_keywords = [
-            "nba",
-            "nfl",
-            "mlb",
-            "soccer",
-            "football",
-            "basketball",
-            "baseball",
-            "league",
-            "cup",
-            "championship",
-            "win",
-            "relegated",
-        ]
-        crypto_keywords = [
-            "bitcoin",
-            "eth",
-            "crypto",
-            "token",
-            "blockchain",
-            "opensea",
-            "nft",
-        ]
-        entertainment_keywords = [
-            "movie",
-            "film",
-            "actor",
-            "actress",
-            "award",
-            "song",
-            "album",
-            "show",
-        ]
-        tech_keywords = ["ai", "openai", "technology", "software", "app", "launch"]
+        categories = {
+            "politics": [
+                "election",
+                "president",
+                "vote",
+                "congress",
+                "senate",
+                "minister",
+                "government",
+                "fed",
+                "rate",
+                "chancellor",
+                "prime minister",
+            ],
+            "sports": [
+                "nba",
+                "nfl",
+                "mlb",
+                "soccer",
+                "football",
+                "basketball",
+                "baseball",
+                "league",
+                "cup",
+                "championship",
+                "win",
+                "relegated",
+            ],
+            "crypto": [
+                "bitcoin",
+                "eth",
+                "crypto",
+                "token",
+                "blockchain",
+                "opensea",
+                "nft",
+            ],
+            "entertainment": [
+                "movie",
+                "film",
+                "actor",
+                "actress",
+                "award",
+                "song",
+                "album",
+                "show",
+            ],
+            "tech": ["ai", "openai", "technology", "software", "app", "launch"],
+        }
 
-        if any(keyword in question for keyword in politics_keywords):
-            return "politics"
-        elif any(keyword in question for keyword in sports_keywords):
-            return "sports"
-        elif any(keyword in question for keyword in crypto_keywords):
-            return "crypto"
-        elif any(keyword in question for keyword in entertainment_keywords):
-            return "entertainment"
-        elif any(keyword in question for keyword in tech_keywords):
-            return "tech"
-        else:
-            return "other"
+        for category, keywords in categories.items():
+            if any(keyword in question for keyword in keywords):
+                return category
 
+        return "other"
 
-def test():
-    host = "https://clob.polymarket.com"
-    key = os.getenv("POLYGON_WALLET_PRIVATE_KEY")
-    print(key)
-    chain_id = POLYGON
+    def format_currency(self, amount: float) -> str:
+        """
+        格式化货币显示
 
-    # Create CLOB client and get/set API credentials
-    client = ClobClient(host, key=key, chain_id=chain_id)
-    client.set_api_creds(client.create_or_derive_api_creds())
+        Args:
+            amount: 金额
 
-    creds = ApiCreds(
-        api_key=os.getenv("CLOB_API_KEY"),
-        api_secret=os.getenv("CLOB_SECRET"),
-        api_passphrase=os.getenv("CLOB_PASS_PHRASE"),
-    )
-    chain_id = AMOY
-    client = ClobClient(host, key=key, chain_id=chain_id, creds=creds)
+        Returns:
+            格式化的货币字符串
+        """
+        return f"${amount:,.4f}" if amount < 1 else f"${amount:,.2f}"
 
-    print(client.get_markets())
-    print(client.get_simplified_markets())
-    print(client.get_sampling_markets())
-    print(client.get_sampling_simplified_markets())
-    print(client.get_market("condition_id"))
+    def format_percentage(self, value: float) -> str:
+        """
+        格式化百分比显示
 
-    print("Done!")
+        Args:
+            value: 百分比值
 
+        Returns:
+            格式化的百分比字符串
+        """
+        return f"{value:.2f}%"
 
-def gamma():
-    url = "https://gamma-com"
-    markets_url = url + "/markets"
-    res = httpx.get(markets_url)
-    code = res.status_code
-    if code == 200:
-        markets: list[SimpleMarket] = []
-        data = res.json()
-        for market in data:
+    def validate_order_params(
+        self, token_id: str, side: str, size: float, price: float | None = None
+    ) -> dict[str, Any]:
+        """
+        验证订单参数
+
+        Args:
+            token_id: 代币ID
+            side: 买卖方向
+            size: 订单大小
+            price: 价格 (限价订单需要)
+
+        Returns:
+            验证结果
+        """
+        errors = []
+
+        # 验证代币ID
+        if not token_id or not isinstance(token_id, str):
+            errors.append("Invalid token_id")
+
+        # 验证方向
+        if side.upper() not in ["BUY", "SELL"]:
+            errors.append("Side must be 'BUY' or 'SELL'")
+
+        # 验证大小
+        if size <= 0:
+            errors.append("Size must be positive")
+
+        # 验证价格 (如果提供)
+        if price is not None:
+            if not (0 < price < 1):
+                errors.append("Price must be between 0 and 1")
+
+        return {
+            "valid": len(errors) == 0,
+            "errors": errors,
+            "warnings": [],
+        }
+
+    def get_trading_fees(self, size: float, price: float) -> dict[str, float]:
+        """
+        计算交易费用
+
+        Args:
+            size: 订单大小
+            price: 价格
+
+        Returns:
+            费用信息
+        """
+        notional = size * price
+
+        # Polymarket 的费用结构 (需要根据实际情况调整)
+        maker_fee_rate = 0.001  # 0.1%
+        taker_fee_rate = 0.001  # 0.1%
+
+        return {
+            "notional": notional,
+            "maker_fee": notional * maker_fee_rate,
+            "taker_fee": notional * taker_fee_rate,
+            "estimated_fee": notional * taker_fee_rate,  # 保守估计使用taker费用
+        }
+
+    def health_check(self) -> dict[str, Any]:
+        """
+        执行健康检查
+
+        Returns:
+            健康检查结果
+        """
+        results: dict[str, Any] = {
+            "timestamp": str(int(time.time())),
+            "wallet_address": self.wallet_address,
+            "network": "Testnet (Amoy)" if self.use_testnet else "Mainnet (Polygon)",
+            "dry_run_mode": self.dry_run,
+        }
+
+        try:
+            # 检查网络连接
+            results["web3_connected"] = self.w3.is_connected()
+
+            # 检查API连接
             try:
-                market_data = {
-                    "id": int(market["id"]),
-                    "question": market["question"],
-                    # "start": market['startDate'],
-                    "end": market["endDate"],
-                    "description": market["description"],
-                    "active": market["active"],
-                    "deployed": market["deployed"],
-                    "funded": market["funded"],
-                    # "orderMinSize": float(market['orderMinSize']) if market['orderMinSize'] else 0,
-                    # "orderPriceMinTickSize": float(market['orderPriceMinTickSize']),
-                    "rewardsMinSize": float(market["rewardsMinSize"]),
-                    "rewardsMaxSpread": float(market["rewardsMaxSpread"]),
-                    "volume": float(market["volume"]),
-                    "spread": float(market["spread"]),
-                    "outcome_a": str(market["outcomes"][0]),
-                    "outcome_b": str(market["outcomes"][1]),
-                    "outcome_a_price": str(market["outcomePrices"][0]),
-                    "outcome_b_price": str(market["outcomePrices"][1]),
-                }
-                markets.append(SimpleMarket(**market_data))
-            except Exception as err:
-                print(f"error {err} for market {id}")
-        pdb.set_trace()
-    else:
-        raise Exception()
+                markets = self.get_markets(limit=1)
+                results["api_connected"] = len(markets) >= 0
+            except Exception:
+                results["api_connected"] = False
 
+            # 检查余额
+            try:
+                usdc_balance = self.get_usdc_balance()
+                results["usdc_balance"] = usdc_balance
+                results["sufficient_balance"] = usdc_balance > 0
+            except Exception:
+                results["usdc_balance"] = 0
+                results["sufficient_balance"] = False
 
-def main():
-    # auth()
-    # test()
-    # gamma()
-    print(Polymarket().get_all_events())
+            # 检查授权
+            try:
+                allowance = self.check_usdc_allowance()
+                results["usdc_allowance"] = allowance
+                results["has_allowance"] = allowance > 0
+            except Exception:
+                results["usdc_allowance"] = 0
+                results["has_allowance"] = False
+
+            # 总体状态
+            results["healthy"] = all(
+                [
+                    results["web3_connected"],
+                    results["api_connected"],
+                ]
+            )
+
+        except Exception as e:
+            results["error"] = str(e)
+            results["healthy"] = False
+
+        return results
+
+    def __str__(self) -> str:
+        """字符串表示"""
+        return f"PolymarketClient(wallet={self.wallet_address[:10]}..., dry_run={self.dry_run})"
+
+    def __repr__(self) -> str:
+        """详细字符串表示"""
+        return (
+            f"PolymarketClient("
+            f"wallet={self.wallet_address}, "
+            f"network={'Testnet' if self.use_testnet else 'Mainnet'}, "
+            f"dry_run={self.dry_run})"
+        )
 
 
 if __name__ == "__main__":
-    load_dotenv()
+    # 简单测试和演示
+    print("=== Polymarket Client 演示 ===\n")
 
-    main()
+    # 初始化客户端 (dry_run 模式)
+    client = PolymarketClient(dry_run=True, log_level="INFO")
 
-    exit()
+    # 1. 获取市场数据
+    print("1. 获取热门市场:")
+    markets = client.get_markets(limit=5)
+    for i, market in enumerate(markets[:3], 1):
+        print(f"   {i}. {market.question}")
+        print(f"      交易量: ${market.volume:,.2f}")
+        print(f"      状态: {'活跃' if market.active else '非活跃'}")
+        print()
 
-    p = Polymarket()
+    if markets:
+        # 2. 获取第一个市场的详细信息
+        first_market = markets[0]
+        if first_market.token_ids:
+            token_id = first_market.token_ids[0]
+            print(f"2. 市场详细信息 - {first_market.question[:50]}...")
 
-    # k = p.get_api_key()
-    # m = p.get_sampling_simplified_markets()
+            # 获取价格信息
+            try:
+                mid_price = client.get_mid_price(token_id)
+                print(f"   中间价: {client.format_currency(mid_price)}")
 
-    # print(m)
-    # m = p.get_market('11015470973684177829729219287262166995141465048508201953575582100565462316088')
+                # 获取价差信息
+                spread = client.get_spread(token_id)
+                print(f"   买一价: {client.format_currency(spread['best_bid'])}")
+                print(f"   卖一价: {client.format_currency(spread['best_ask'])}")
+                print(f"   价差: {client.format_percentage(spread['spread_pct'])}")
 
-    # t = m[0]['token_id']
-    # o = p.get_orderbook(t)
-    # pdb.set_trace()
+            except Exception as e:
+                print(f"   获取价格信息失败: {e}")
+            print()
 
-    """
-    
-    (Pdb) pprint(o)
-            OrderBookSummary(
-                market='0x26ee82bee2493a302d21283cb578f7e2fff2dd15743854f53034d12420863b55', 
-                asset_id='11015470973684177829729219287262166995141465048508201953575582100565462316088', 
-                bids=[OrderSummary(price='0.01', size='600005'), OrderSummary(price='0.02', size='200000'), ...
-                asks=[OrderSummary(price='0.99', size='100000'), OrderSummary(price='0.98', size='200000'), ...
-            )
-    
-    """
+    # 3. 健康检查
+    print("3. 系统状态检查:")
+    health = client.health_check()
+    print(f"   网络连接: {'✓' if health.get('web3_connected') else '✗'}")
+    print(f"   API 连接: {'✓' if health.get('api_connected') else '✗'}")
+    print(f"   模式: {'模拟模式' if health.get('dry_run_mode') else '实盘模式'}")
+    print(f"   网络: {health.get('network', 'Unknown')}")
 
-    # https://polygon-rpc.com
-
-    test_market_token_id = (
-        "101669189743438912873361127612589311253202068943959811456820079057046819967115"
+    # 4. 演示订单验证
+    print("\n4. 订单验证演示:")
+    validation = client.validate_order_params(
+        token_id="test_token_abc123", side="BUY", size=10.0, price=0.55
     )
-    test_market_data = p.get_market(test_market_token_id)
+    print(f"   参数有效: {'✓' if validation['valid'] else '✗'}")
+    if validation["errors"]:
+        for error in validation["errors"]:
+            print(f"   错误: {error}")
 
-    # test_size = 0.0001
-    test_size = 1
-    test_side = BUY
-    if test_market_data is not None:
-        test_price = float(ast.literal_eval(test_market_data.outcome_prices)[0])
-    else:
-        test_price = 0.0
+    print("\n=== 演示完成 ===")
+    print(f"客户端信息: {client}")
 
-    # order = p.execute_order(
-    #    test_price,
-    #    test_size,
-    #    test_side,
-    #    test_market_token_id,
-    # )
+    # 5. 类别检测演示
+    print("\n5. 市场类别检测演示:")
+    sample_questions = [
+        "Will Donald Trump win the 2024 election?",
+        "Will the Lakers make the playoffs?",
+        "Will Bitcoin reach $100k by end of 2024?",
+        "Will a new AI model be released by OpenAI?",
+    ]
 
-    # order = p.execute_market_order(test_price, test_market_token_id)
+    for question in sample_questions:
+        category = client.detect_category(question)
+        print(f"   '{question}' -> {category}")
 
-    balance = p.get_usdc_balance()
+    print("\n客户端功能验证完成！")
