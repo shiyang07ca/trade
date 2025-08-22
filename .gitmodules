@@ -10,3 +10,6 @@
 [submodule "external/FinancePy"]
 	path = external/FinancePy
 	url = https://github.com/domokane/FinancePy.git
+[submodule "external/poly-maker"]
+	path = external/poly-maker
+	url = https://github.com/warproxxx/poly-maker.git
