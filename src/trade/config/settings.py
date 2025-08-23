@@ -6,8 +6,10 @@ from enum import Enum
 from pathlib import Path
 from typing import Literal
 
+from pprint import pprint
 from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings
+from pydantic_settings import SettingsConfigDict
 
 
 class LogLevel(str, Enum):
@@ -66,3 +68,5 @@ class Settings(BaseSettings):
 
 # 创建全局配置实例
 settings = Settings()
+
+pprint(settings)

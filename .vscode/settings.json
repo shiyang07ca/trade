@@ -8,7 +8,7 @@
   "python.analysis.fixAll": [
     "source.unusedImports"
   ],
-  "python.languageServer": "Pylance",
+  "python.languageServer": "None",
   "python.testing.pytestArgs": [
     "tests"
   ],

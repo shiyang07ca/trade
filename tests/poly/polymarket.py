@@ -321,6 +321,43 @@ class PolymarketClient:
 
     def _parse_market_data(self, data: dict[str, Any]) -> MarketInfo:
         """解析市场数据"""
+        # 安全解析 outcome_prices
+        outcome_prices = []
+        raw_prices = data.get("outcomePrices", [])
+
+        if isinstance(raw_prices, list):
+            for price in raw_prices:
+                try:
+                    # 尝试转换为浮点数
+                    if isinstance(price, (int, float)):
+                        outcome_prices.append(float(price))
+                    elif isinstance(price, str):
+                        # 处理字符串形式的数字
+                        if (
+                            price.strip()
+                            and price.strip() != "["
+                            and price.strip() != "]"
+                        ):
+                            outcome_prices.append(float(price.strip()))
+                except (ValueError, TypeError):
+                    # 如果转换失败，跳过这个值
+                    self.logger.debug(f"Skipping invalid price value: {price}")
+                    continue
+        elif isinstance(raw_prices, str):
+            # 如果整个字段是字符串，尝试解析
+            try:
+                import json
+
+                parsed_prices = json.loads(raw_prices)
+                if isinstance(parsed_prices, list):
+                    for price in parsed_prices:
+                        try:
+                            outcome_prices.append(float(price))
+                        except (ValueError, TypeError):
+                            continue
+            except json.JSONDecodeError:
+                self.logger.debug(f"Failed to parse price string: {raw_prices}")
+
         return MarketInfo(
             id=str(data["id"]),
             question=data["question"],
@@ -331,7 +368,7 @@ class PolymarketClient:
             volume=float(data.get("volume", 0)),
             spread=float(data.get("spread", 0)),
             outcomes=data.get("outcomes", []),
-            outcome_prices=[float(p) for p in data.get("outcomePrices", [])],
+            outcome_prices=outcome_prices,
             token_ids=data.get("clobTokenIds", []),
         )
 
